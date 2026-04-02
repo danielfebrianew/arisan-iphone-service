@@ -32,6 +32,9 @@ export class Ticket {
   @Column({ type: 'varchar', length: 36 })
   group_id: string;
 
+  @Column({ type: 'int', nullable: true })
+  slot_number: number | null;
+
   @Column({
     type: 'enum',
     enum: TicketStatus,
