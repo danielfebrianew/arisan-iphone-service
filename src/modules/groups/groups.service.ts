@@ -158,6 +158,7 @@ export class GroupsService {
           tickets: userTickets.map((t) => ({
             id: t.id,
             ticket_code: t.ticket_code,
+            slot_number: t.slot_number,
             status: t.status,
             created_at: t.created_at,
           })),

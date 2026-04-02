@@ -72,10 +72,18 @@ export class TicketsService {
       if (!exists) isUnique = true;
     }
 
+    const maxSlot = await this.ticketRepo
+      .createQueryBuilder('t')
+      .select('MAX(t.slot_number)', 'max')
+      .where('t.group_id = :groupId', { groupId: dto.group_id })
+      .getRawOne();
+    const nextSlot = (maxSlot?.max ?? 0) + 1;
+
     const ticket = this.ticketRepo.create({
       ticket_code,
       user_id: userId,
       group_id: dto.group_id,
+      slot_number: nextSlot,
       status: TicketStatus.PENDING_PAYMENT,
     });
 
