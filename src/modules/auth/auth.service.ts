@@ -41,7 +41,9 @@ export class AuthService {
       const referrer = await this.userRepo.findOne({
         where: { referral_code: dto.referral_code },
       });
-      if (!referrer) throw new BadRequestException('Kode sponsor tidak valid');
+      if (!referrer || referrer.referral_code !== dto.referral_code) {
+        throw new BadRequestException('Kode sponsor tidak valid');
+      }
       referrerId = referrer.id;
     }
 
@@ -112,10 +114,12 @@ export class AuthService {
 
     const referrer = await this.userRepo.findOne({
       where: { referral_code: code },
-      select: ['id', 'name', 'username'],
+      select: ['id', 'name', 'username', 'referral_code'],
     });
 
-    if (!referrer) throw new NotFoundException('Kode sponsor tidak valid');
+    if (!referrer || referrer.referral_code !== code) {
+      throw new NotFoundException('Kode sponsor tidak valid');
+    }
 
     return {
       valid: true,
