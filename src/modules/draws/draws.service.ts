@@ -2,20 +2,19 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
-  ForbiddenException,
   Inject,
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
-import { randomBytes } from 'crypto';
+import { Repository, DataSource, In } from 'typeorm';
 import { Draw, DrawStatus } from './entities/draw.entity';
 import { Group, GroupStatus } from '../groups/entities/group.entity';
-import { GroupMember } from '../groups/entities/group-member.entity';
 import { Ticket, TicketStatus } from '../tickets/entities/ticket.entity';
 import { ActivityLogService } from '../admin/services/activity-log.service';
 import { ActivityAction, ActivityTargetType } from '../admin/entities/activity-log.entity';
 import { User } from '../users/entities/user.entity';
+
+const DRAW_ELIGIBLE_TICKET_STATUSES = [TicketStatus.PAID, TicketStatus.ACTIVE];
 
 @Injectable()
 export class DrawsService {
@@ -24,8 +23,6 @@ export class DrawsService {
     private readonly drawRepo: Repository<Draw>,
     @InjectRepository(Group)
     private readonly groupRepo: Repository<Group>,
-    @InjectRepository(GroupMember)
-    private readonly memberRepo: Repository<GroupMember>,
     @InjectRepository(Ticket)
     private readonly ticketRepo: Repository<Ticket>,
     private readonly dataSource: DataSource,
@@ -33,19 +30,67 @@ export class DrawsService {
     private readonly activityLogService: ActivityLogService,
   ) {}
 
-  async createScheduledDraw(groupId: string, activatedAt: Date): Promise<Draw> {
-    const scheduledDate = new Date(activatedAt);
-    scheduledDate.setDate(scheduledDate.getDate() + 30);
-
+  async createScheduledDraw(groupId: string, scheduledDate: Date): Promise<Draw> {
     const draw = this.drawRepo.create({
       group_id: groupId,
       status: DrawStatus.SCHEDULED,
-      scheduled_date: scheduledDate,
+      scheduled_date: new Date(scheduledDate),
     });
     return this.drawRepo.save(draw);
   }
 
-  async spin(groupId: string, requestingUserId: string): Promise<Draw> {
+  async syncScheduledDrawDate(groupId: string, scheduledDate: Date): Promise<void> {
+    await this.drawRepo.update(
+      { group_id: groupId, status: DrawStatus.SCHEDULED },
+      { scheduled_date: new Date(scheduledDate) },
+    );
+  }
+
+  private async enrichDraw(draw: Draw): Promise<any> {
+    const [group, winner, winnerTicket] = await Promise.all([
+      this.groupRepo.findOne({ where: { id: draw.group_id } }),
+      draw.winner_user_id
+        ? this.dataSource.manager.findOne(User, { where: { id: draw.winner_user_id } })
+        : Promise.resolve(null),
+      draw.winner_ticket_id
+        ? this.ticketRepo.findOne({ where: { id: draw.winner_ticket_id } })
+        : Promise.resolve(null),
+    ]);
+
+    return {
+      ...draw,
+      group: group
+        ? {
+            id: group.id,
+            name: group.name,
+            status: group.status,
+            icon: group.icon,
+            prize: group.prize,
+            ticket_price: group.ticket_price,
+            next_draw_date: group.next_draw_date,
+          }
+        : null,
+      winner: winner
+        ? {
+            id: winner.id,
+            username: winner.username,
+            name: winner.name,
+            role: winner.role,
+          }
+        : null,
+      winner_ticket: winnerTicket
+        ? {
+            id: winnerTicket.id,
+            ticket_code: winnerTicket.ticket_code,
+            slot_number: winnerTicket.slot_number,
+            status: winnerTicket.status,
+            created_at: winnerTicket.created_at,
+          }
+        : null,
+    };
+  }
+
+  async spin(groupId: string, winnerUserId: string, adminUserId: string): Promise<any> {
     // 1. Validate group exists and is ACTIVE
     const group = await this.groupRepo.findOne({ where: { id: groupId } });
     if (!group) throw new NotFoundException(`Group ${groupId} not found`);
@@ -53,15 +98,7 @@ export class DrawsService {
       throw new BadRequestException('Group is not active');
     }
 
-    // 2. Validate requester is ketua
-    const member = await this.memberRepo.findOne({
-      where: { group_id: groupId, user_id: requestingUserId },
-    });
-    if (!member || !member.is_ketua) {
-      throw new ForbiddenException('Only the ketua can perform the spin');
-    }
-
-    // 3. Validate draw exists and scheduled_date has passed
+    // 2. Validate draw exists and scheduled_date has passed
     const draw = await this.drawRepo.findOne({
       where: { group_id: groupId, status: DrawStatus.SCHEDULED },
     });
@@ -80,20 +117,21 @@ export class DrawsService {
       );
     }
 
-    // 4. Fetch all active tickets for this group
-    const activeTickets = await this.ticketRepo.find({
-      where: { group_id: groupId, status: TicketStatus.ACTIVE },
+    // 3. Validate selected winner has a paid or active ticket in this group
+    const winnerTicket = await this.ticketRepo.findOne({
+      where: {
+        group_id: groupId,
+        user_id: winnerUserId,
+        status: In(DRAW_ELIGIBLE_TICKET_STATUSES),
+      },
+      order: { created_at: 'ASC' },
     });
 
-    if (activeTickets.length === 0) {
-      throw new BadRequestException('No active tickets found for this group');
+    if (!winnerTicket) {
+      throw new BadRequestException('Selected winner does not have a paid or active ticket in this group');
     }
 
-    // 5. Crypto-random winner selection
-    const winnerTicket = this.pickRandom(activeTickets);
-    const winnerUserId = winnerTicket.user_id;
-
-    // 6. Post-spin transaction
+    // 4. Post-spin transaction
     await this.dataSource.transaction(async (manager) => {
       // Winning ticket → WON
       await manager.update(Ticket, winnerTicket.id, { status: TicketStatus.WON });
@@ -106,17 +144,21 @@ export class DrawsService {
         .where('group_id = :groupId', { groupId })
         .andWhere('user_id = :userId', { userId: winnerUserId })
         .andWhere('id != :winnerTicketId', { winnerTicketId: winnerTicket.id })
-        .andWhere('status = :status', { status: TicketStatus.ACTIVE })
+        .andWhere('status IN (:...statuses)', {
+          statuses: DRAW_ELIGIBLE_TICKET_STATUSES,
+        })
         .execute();
 
-      // All active tickets of other users → EXPIRED
+      // All paid or active tickets of other users → EXPIRED
       await manager
         .createQueryBuilder()
         .update(Ticket)
         .set({ status: TicketStatus.EXPIRED })
         .where('group_id = :groupId', { groupId })
         .andWhere('user_id != :userId', { userId: winnerUserId })
-        .andWhere('status = :status', { status: TicketStatus.ACTIVE })
+        .andWhere('status IN (:...statuses)', {
+          statuses: DRAW_ELIGIBLE_TICKET_STATUSES,
+        })
         .execute();
 
       // Draw → COMPLETED
@@ -137,7 +179,7 @@ export class DrawsService {
 
     if (groupData && winnerData) {
       await this.activityLogService.log({
-        actorId: requestingUserId,
+        actorId: adminUserId,
         action: ActivityAction.DRAW_EXECUTED,
         targetType: ActivityTargetType.GROUP,
         targetId: groupId,
@@ -148,31 +190,30 @@ export class DrawsService {
       });
     }
 
-    return this.drawRepo.findOne({ where: { id: draw.id } }) as Promise<Draw>;
+    const completedDraw = await this.drawRepo.findOne({ where: { id: draw.id } });
+    if (!completedDraw) {
+      throw new NotFoundException(`Draw ${draw.id} not found after completion`);
+    }
+
+    return this.enrichDraw(completedDraw);
   }
 
-  async getDrawResult(groupId: string): Promise<Draw> {
+  async getDrawResult(groupId: string): Promise<any> {
     const draw = await this.drawRepo.findOne({
       where: { group_id: groupId, status: DrawStatus.COMPLETED },
     });
     if (!draw) {
       throw new NotFoundException('No completed draw found for this group');
     }
-    return draw;
+    return this.enrichDraw(draw);
   }
 
-  async getHistory(groupId: string): Promise<Draw[]> {
-    return this.drawRepo.find({
+  async getHistory(groupId: string): Promise<any[]> {
+    const draws = await this.drawRepo.find({
       where: { group_id: groupId },
       order: { created_at: 'DESC' },
     });
-  }
 
-  private pickRandom<T>(arr: T[]): T {
-    // crypto-random index for fairness
-    const randomBuffer = randomBytes(4);
-    const randomValue = randomBuffer.readUInt32BE(0);
-    const index = randomValue % arr.length;
-    return arr[index];
+    return Promise.all(draws.map((draw) => this.enrichDraw(draw)));
   }
 }

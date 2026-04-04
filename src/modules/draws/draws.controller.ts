@@ -3,7 +3,9 @@ import {
   Post,
   Get,
   Param,
-  Query,
+  Body,
+  Req,
+  UseGuards,
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
@@ -13,9 +15,14 @@ import {
   ApiResponse,
   ApiBearerAuth,
   ApiParam,
-  ApiQuery,
+  ApiBody,
 } from '@nestjs/swagger';
+import { Request } from 'express';
 import { DrawsService } from './draws.service';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Role } from '../users/entities/user.entity';
+import { SpinDrawDto } from './dto/spin-draw.dto';
 
 const drawExample = {
   id: 'd1e2f3a4-b5c6-7890-abcd-ef1234567890',
@@ -29,6 +36,55 @@ const drawExample = {
   updated_at: '2026-04-15T14:00:00.000Z',
 };
 
+const drawResultExample = {
+  ...drawExample,
+  group: {
+    id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    name: 'Grup Draw',
+    status: 'completed',
+    icon: 'bike',
+    prize: 'naik gunung',
+    ticket_price: '10000000.00',
+    next_draw_date: '2026-04-10',
+  },
+  winner: {
+    id: '550e8400-e29b-41d4-a716-446655440000',
+    username: 'daniel_member',
+    name: 'Daniel',
+    role: 'member',
+  },
+  winner_ticket: {
+    id: 'b1c2d3e4-f5a6-7890-abcd-ef1234567890',
+    ticket_code: 'TKT-E07402',
+    slot_number: 1,
+    status: 'won',
+    created_at: '2026-04-03T22:28:23.678Z',
+  },
+};
+
+const scheduledHistoryExample = {
+  id: 'e2f3a4b5-c6d7-8901-abcd-ef1234567890',
+  group_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+  status: 'scheduled',
+  scheduled_date: '2026-05-15T00:00:00.000Z',
+  winner_user_id: null,
+  winner_ticket_id: null,
+  drawn_at: null,
+  created_at: '2026-04-15T14:00:00.000Z',
+  updated_at: '2026-04-15T14:00:00.000Z',
+  group: {
+    id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    name: 'Grup Draw',
+    status: 'active',
+    icon: 'bike',
+    prize: 'naik gunung',
+    ticket_price: '10000000.00',
+    next_draw_date: '2026-05-15',
+  },
+  winner: null,
+  winner_ticket: null,
+};
+
 @ApiTags('Draws')
 @ApiBearerAuth('JWT')
 @Controller('draws')
@@ -37,27 +93,32 @@ export class DrawsController {
   constructor(private readonly drawsService: DrawsService) {}
 
   @Post(':groupId/spin')
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
   @ApiOperation({
-    summary: 'Trigger draw/spin (ketua only)',
-    description: 'Only the group ketua/leader can trigger the draw. The draw must be scheduled and the scheduled date must have passed.',
+    summary: 'Trigger draw/spin by selecting a winner (ADMIN only)',
+    description: 'Only admins can complete a scheduled draw by selecting a winner with an active ticket in the target group.',
   })
   @ApiParam({ name: 'groupId', type: String, description: 'Group ID (UUID)' })
-  @ApiQuery({
-    name: 'userId',
-    type: String,
-    description: 'Ketua user ID (UUID)',
-    required: true,
+  @ApiBody({
+    type: SpinDrawDto,
+    description: 'Selected winner for the draw',
+    schema: {
+      example: {
+        winner_user_id: '550e8400-e29b-41d4-a716-446655440000',
+      },
+    },
   })
   @ApiResponse({
     status: 201,
     description: 'Draw spin completed successfully',
     schema: {
-      example: drawExample,
+      example: drawResultExample,
     },
   })
   @ApiResponse({
     status: 400,
-    description: 'Group not active, no active tickets, or draw date not reached',
+    description: 'Group not active, winner has no paid or active ticket, or draw date not reached',
     schema: {
       example: {
         statusCode: 400,
@@ -68,11 +129,11 @@ export class DrawsController {
   })
   @ApiResponse({
     status: 403,
-    description: 'Only ketua can perform the spin',
+    description: 'Only admins can perform the spin',
     schema: {
       example: {
         statusCode: 403,
-        message: 'Only the ketua can perform the spin',
+        message: 'Kamu tidak punya akses ke resource ini',
         error: 'Forbidden',
       },
     },
@@ -80,9 +141,10 @@ export class DrawsController {
   @ApiResponse({ status: 404, description: 'Group or scheduled draw not found' })
   spin(
     @Param('groupId') groupId: string,
-    @Query('userId') userId: string,
+    @Body() dto: SpinDrawDto,
+    @Req() req: Request & { user: { id: string } },
   ) {
-    return this.drawsService.spin(groupId, userId);
+    return this.drawsService.spin(groupId, dto.winnerUserId, req.user.id);
   }
 
   @Get(':groupId/result')
@@ -92,7 +154,7 @@ export class DrawsController {
     status: 200,
     description: 'Draw result retrieved',
     schema: {
-      example: drawExample,
+      example: drawResultExample,
     },
   })
   @ApiResponse({
@@ -118,18 +180,8 @@ export class DrawsController {
     description: 'Draw history retrieved',
     schema: {
       example: [
-        drawExample,
-        {
-          id: 'e2f3a4b5-c6d7-8901-abcd-ef1234567890',
-          group_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
-          status: 'scheduled',
-          scheduled_date: '2026-05-15T00:00:00.000Z',
-          winner_user_id: null,
-          winner_ticket_id: null,
-          drawn_at: null,
-          created_at: '2026-04-15T14:00:00.000Z',
-          updated_at: '2026-04-15T14:00:00.000Z',
-        },
+        drawResultExample,
+        scheduledHistoryExample,
       ],
     },
   })

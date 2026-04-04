@@ -6,7 +6,7 @@ export type GroupIcon = typeof GROUP_ICONS[number];
 export class CreateGroupDto {
   @IsString()
   @IsNotEmpty()
-  name: string;
+  name!: string;
 
   @IsNumber()
   @IsOptional()

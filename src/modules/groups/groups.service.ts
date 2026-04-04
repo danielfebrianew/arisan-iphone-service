@@ -378,6 +378,13 @@ export class GroupsService {
 
     await this.groupRepo.update(groupId, updateData);
 
+    if (dto.next_draw_date) {
+      await this.drawsService.syncScheduledDrawDate(
+        groupId,
+        updateData.next_draw_date,
+      );
+    }
+
     if (changedFields.length > 0) {
       await this.activityLogService.log({
         actorId: group.created_by,
@@ -444,7 +451,7 @@ export class GroupsService {
       activated_at: activatedAt,
     });
 
-    await this.drawsService.createScheduledDraw(groupId, activatedAt);
+    await this.drawsService.createScheduledDraw(groupId, nextDrawDate);
 
     await this.activityLogService.log({
       actorId: group.created_by,
