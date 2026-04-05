@@ -147,6 +147,39 @@ export class DrawsController {
     return this.drawsService.spin(groupId, dto.winnerUserId, req.user.id);
   }
 
+  @Post(':groupId/complete')
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @ApiOperation({
+    summary: 'Complete a group after spin (ADMIN only)',
+    description: 'Marks the group as completed. Can only be called after spin has been performed and a winner has been selected.',
+  })
+  @ApiParam({ name: 'groupId', type: String, description: 'Group ID (UUID)' })
+  @ApiResponse({
+    status: 201,
+    description: 'Group completed successfully',
+    schema: { example: drawResultExample },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Group is not active or spin has not been performed yet',
+    schema: {
+      example: {
+        statusCode: 400,
+        message: 'No completed draw with a winner found. Run spin first.',
+        error: 'Bad Request',
+      },
+    },
+  })
+  @ApiResponse({ status: 403, description: 'Only admins can complete a group' })
+  @ApiResponse({ status: 404, description: 'Group not found' })
+  complete(
+    @Param('groupId') groupId: string,
+    @Req() req: Request & { user: { id: string } },
+  ) {
+    return this.drawsService.complete(groupId, req.user.id);
+  }
+
   @Get(':groupId/result')
   @ApiOperation({ summary: 'Get latest draw result for a group' })
   @ApiParam({ name: 'groupId', type: String, description: 'Group ID (UUID)' })

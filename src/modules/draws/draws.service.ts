@@ -168,9 +168,6 @@ export class DrawsService {
         winner_ticket_id: winnerTicket.id,
         drawn_at: new Date(),
       });
-
-      // Group → COMPLETED
-      await manager.update(Group, groupId, { status: GroupStatus.COMPLETED });
     });
 
     // Log activity after transaction
@@ -196,6 +193,40 @@ export class DrawsService {
     }
 
     return this.enrichDraw(completedDraw);
+  }
+
+  async complete(groupId: string, adminUserId: string): Promise<any> {
+    // 1. Validate group exists and is ACTIVE
+    const group = await this.groupRepo.findOne({ where: { id: groupId } });
+    if (!group) throw new NotFoundException(`Group ${groupId} not found`);
+    if (group.status !== GroupStatus.ACTIVE) {
+      throw new BadRequestException('Group is not active');
+    }
+
+    // 2. Validate a completed draw with a winner exists
+    const draw = await this.drawRepo.findOne({
+      where: { group_id: groupId, status: DrawStatus.COMPLETED },
+    });
+    if (!draw || !draw.winner_user_id) {
+      throw new BadRequestException('No completed draw with a winner found. Run spin first.');
+    }
+
+    // 3. Mark group as completed
+    await this.groupRepo.update(groupId, { status: GroupStatus.COMPLETED });
+
+    // 4. Log activity
+    const groupData = await this.groupRepo.findOne({ where: { id: groupId } });
+    if (groupData) {
+      await this.activityLogService.log({
+        actorId: adminUserId,
+        action: ActivityAction.GROUP_COMPLETED,
+        targetType: ActivityTargetType.GROUP,
+        targetId: groupId,
+        metadata: { group_name: groupData.name },
+      });
+    }
+
+    return this.enrichDraw(draw);
   }
 
   async getDrawResult(groupId: string): Promise<any> {
