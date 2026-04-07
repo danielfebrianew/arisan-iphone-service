@@ -21,6 +21,7 @@ import { Request } from 'express';
 import { DrawsService } from './draws.service';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { IsKetuaGuard } from '../../common/guards/is-ketua.guard';
 import { Role } from '../users/entities/user.entity';
 import { SpinDrawDto } from './dto/spin-draw.dto';
 
@@ -192,11 +193,10 @@ export class DrawsController {
   }
 
   @Post(':groupId/spin')
-  @UseGuards(RolesGuard)
-  @Roles(Role.ADMIN)
+  @UseGuards(IsKetuaGuard)
   @ApiOperation({
-    summary: 'Spin the draw wheel to reveal the winner (ADMIN only)',
-    description: 'Reveals the pre-selected winner. Group must be active and a winner must have been picked via pick-winner first. Marks tickets as WON/EXPIRED and completes the draw.',
+    summary: 'Spin the draw wheel to reveal the winner (Ketua only)',
+    description: 'Reveals the pre-selected winner. Only the group ketua (or admin) can perform this. Group must be active and a winner must have been picked via pick-winner first. Marks tickets as WON/EXPIRED and completes the draw.',
   })
   @ApiParam({ name: 'groupId', type: String, description: 'Group ID (UUID)' })
   @ApiResponse({
@@ -231,8 +231,8 @@ export class DrawsController {
   })
   @ApiResponse({
     status: 403,
-    description: 'Only admins can perform the spin',
-    schema: { example: forbidden403 },
+    description: 'Only the group ketua can perform the spin',
+    schema: { example: { statusCode: 403, message: 'Hanya ketua grup yang dapat melakukan aksi ini', error: 'Forbidden' } },
   })
   @ApiResponse({
     status: 404,
