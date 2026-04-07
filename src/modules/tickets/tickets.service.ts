@@ -12,6 +12,12 @@ import { GroupMember } from '../groups/entities/group-member.entity';
 import { BuyTicketDto } from './dto/buy-ticket.dto';
 import { randomBytes } from 'crypto';
 
+const SLOT_OCCUPYING_STATUSES = [
+  TicketStatus.PAID,
+  TicketStatus.ACTIVE,
+  TicketStatus.WON,
+];
+
 @Injectable()
 export class TicketsService {
   constructor(
@@ -41,9 +47,9 @@ export class TicketsService {
       );
     }
 
-    // Cek kapasitas berdasarkan jumlah SLOT (ticket non-cancelled dan non-expired)
+    // Pending payments do not reserve capacity. Only verified/eligible tickets occupy slots.
     const slotCount = await this.ticketRepo.count({
-      where: { group_id: dto.group_id, status: Not(In([TicketStatus.CANCELLED, TicketStatus.EXPIRED])) },
+      where: { group_id: dto.group_id, status: In(SLOT_OCCUPYING_STATUSES) },
     });
     if (slotCount >= group.max_members) {
       throw new BadRequestException(
@@ -72,30 +78,15 @@ export class TicketsService {
       if (!exists) isUnique = true;
     }
 
-    const maxSlot = await this.ticketRepo
-      .createQueryBuilder('t')
-      .select('MAX(t.slot_number)', 'max')
-      .where('t.group_id = :groupId', { groupId: dto.group_id })
-      .getRawOne();
-    const nextSlot = (maxSlot?.max ?? 0) + 1;
-
     const ticket = this.ticketRepo.create({
       ticket_code,
       user_id: userId,
       group_id: dto.group_id,
-      slot_number: nextSlot,
+      slot_number: null,
       status: TicketStatus.PENDING_PAYMENT,
     });
 
     const saved = await this.ticketRepo.save(ticket);
-
-    // Update group status to FULL jika slot sudah penuh
-    const newSlotCount = await this.ticketRepo.count({
-      where: { group_id: dto.group_id, status: Not(In([TicketStatus.CANCELLED, TicketStatus.EXPIRED])) },
-    });
-    if (newSlotCount >= group.max_members && group.status !== GroupStatus.FULL) {
-      await this.groupRepo.update(dto.group_id, { status: GroupStatus.FULL });
-    }
 
     // Load with relations
     const ticketWithRelations = await this.ticketRepo.findOne({

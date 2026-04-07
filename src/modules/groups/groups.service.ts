@@ -239,7 +239,7 @@ export class GroupsService {
 
     // Cek kapasitas berdasarkan slot (ticket count)
     const slotCount = await this.ticketRepo.count({
-      where: { group_id: groupId, status: Not(TicketStatus.CANCELLED) },
+      where: { group_id: groupId, status: In(ELIGIBLE_STATUSES) },
     });
     if (slotCount >= group.max_members) {
       throw new BadRequestException('Group is already full');
@@ -444,14 +444,22 @@ export class GroupsService {
 
     const activatedAt = new Date();
     const nextDrawDate = new Date(dto.next_draw_date);
+    const scheduledDraw = await this.drawsService.ensureScheduledDraw(
+      groupId,
+      nextDrawDate,
+    );
+
+    if (!scheduledDraw.winner_user_id || !scheduledDraw.winner_ticket_id) {
+      throw new BadRequestException(
+        'Group must have a winner before activation',
+      );
+    }
 
     await this.groupRepo.update(groupId, {
       status: GroupStatus.ACTIVE,
       next_draw_date: nextDrawDate,
       activated_at: activatedAt,
     });
-
-    await this.drawsService.createScheduledDraw(groupId, nextDrawDate);
 
     await this.activityLogService.log({
       actorId: group.created_by,

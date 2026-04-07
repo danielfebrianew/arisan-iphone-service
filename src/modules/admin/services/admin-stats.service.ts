@@ -8,6 +8,12 @@ import { Ticket, TicketStatus } from '../../tickets/entities/ticket.entity';
 import { ActivityLogService } from './activity-log.service';
 import { ActivityAction, ActivityTargetType } from '../entities/activity-log.entity';
 
+const SLOT_OCCUPYING_STATUSES = [
+  TicketStatus.PAID,
+  TicketStatus.ACTIVE,
+  TicketStatus.WON,
+];
+
 export interface StatsResponse {
   groups: {
     total: number;
@@ -186,7 +192,7 @@ export class AdminStatsService {
     // Rollback status grup jika sebelumnya FULL tapi slot sudah berkurang
     if (ticket.group.status === GroupStatus.FULL) {
       const slotCount = await this.ticketRepo.count({
-        where: { group_id: ticket.group_id, status: Not(TicketStatus.CANCELLED) },
+        where: { group_id: ticket.group_id, status: In(SLOT_OCCUPYING_STATUSES) },
       });
       if (slotCount < ticket.group.max_members) {
         await this.groupRepo.update(ticket.group_id, { status: GroupStatus.PENDING });
@@ -240,7 +246,7 @@ export class AdminStatsService {
     }
 
     const slotCount = await this.ticketRepo.count({
-      where: { group_id: groupId, status: Not(In([TicketStatus.CANCELLED, TicketStatus.EXPIRED])) },
+      where: { group_id: groupId, status: In(SLOT_OCCUPYING_STATUSES) },
     });
 
     let newStatus = group.status;

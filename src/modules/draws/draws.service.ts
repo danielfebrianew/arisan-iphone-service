@@ -39,11 +39,30 @@ export class DrawsService {
     return this.drawRepo.save(draw);
   }
 
-  async syncScheduledDrawDate(groupId: string, scheduledDate: Date): Promise<void> {
-    await this.drawRepo.update(
-      { group_id: groupId, status: DrawStatus.SCHEDULED },
-      { scheduled_date: new Date(scheduledDate) },
-    );
+  async ensureScheduledDraw(groupId: string, scheduledDate: Date): Promise<Draw> {
+    const existingDraw = await this.drawRepo.findOne({
+      where: { group_id: groupId, status: DrawStatus.SCHEDULED },
+    });
+
+    if (existingDraw) {
+      await this.drawRepo.update(existingDraw.id, {
+        scheduled_date: new Date(scheduledDate),
+      });
+
+      const updatedDraw = await this.drawRepo.findOne({
+        where: { id: existingDraw.id },
+      });
+      if (!updatedDraw) {
+        throw new NotFoundException(`Draw ${existingDraw.id} not found`);
+      }
+      return updatedDraw;
+    }
+
+    return this.createScheduledDraw(groupId, scheduledDate);
+  }
+
+  async syncScheduledDrawDate(groupId: string, scheduledDate: Date): Promise<Draw> {
+    return this.ensureScheduledDraw(groupId, scheduledDate);
   }
 
   private async enrichDraw(draw: Draw): Promise<any> {

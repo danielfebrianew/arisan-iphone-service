@@ -6,15 +6,22 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Payment, PaymentStatus } from './entities/payment.entity';
 import { Ticket, TicketStatus } from '../tickets/entities/ticket.entity';
+import { Group, GroupStatus } from '../groups/entities/group.entity';
 import { UploadService } from '../../shared/upload/upload.service';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
 import { ActivityLogService } from '../admin/services/activity-log.service';
 import { ActivityAction, ActivityTargetType } from '../admin/entities/activity-log.entity';
 import { ReferralRewardService } from '../referrals/services/referral-reward.service';
+
+const SLOT_OCCUPYING_STATUSES = [
+  TicketStatus.PAID,
+  TicketStatus.ACTIVE,
+  TicketStatus.WON,
+];
 
 @Injectable()
 export class PaymentsService {
@@ -186,15 +193,81 @@ export class PaymentsService {
       );
     }
 
-    // Update payment
-    payment.status = dto.status;
-    payment.note = dto.note ?? null;
-    await this.paymentRepo.save(payment);
-
-    // Cascade to ticket status
     if (dto.status === PaymentStatus.VERIFIED) {
-      await this.ticketRepo.update(payment.ticket_id, {
-        status: TicketStatus.PAID,
+      await this.paymentRepo.manager.transaction(async (manager) => {
+        const occupiedSlots = await manager.count(Ticket, {
+          where: {
+            group_id: payment.ticket.group.id,
+            status: In(SLOT_OCCUPYING_STATUSES),
+          },
+        });
+
+        if (occupiedSlots >= payment.ticket.group.max_members) {
+          throw new BadRequestException('Group is already full. Payment cannot be verified.');
+        }
+
+        const maxSlot = await manager
+          .createQueryBuilder(Ticket, 't')
+          .select('MAX(t.slot_number)', 'max')
+          .where('t.group_id = :groupId', { groupId: payment.ticket.group.id })
+          .andWhere('t.status IN (:...statuses)', { statuses: SLOT_OCCUPYING_STATUSES })
+          .getRawOne();
+        const nextSlot = Number(maxSlot?.max ?? 0) + 1;
+
+        payment.status = dto.status;
+        payment.note = dto.note ?? null;
+        await manager.save(Payment, payment);
+
+        await manager.update(Ticket, payment.ticket_id, {
+          status: TicketStatus.PAID,
+          slot_number: nextSlot,
+        });
+
+        const occupiedAfterVerification = occupiedSlots + 1;
+        if (occupiedAfterVerification >= payment.ticket.group.max_members) {
+          if (![GroupStatus.ACTIVE, GroupStatus.COMPLETED].includes(payment.ticket.group.status)) {
+            await manager.update(Group, payment.ticket.group.id, {
+              status: GroupStatus.FULL,
+            });
+          }
+
+          const pendingTickets = await manager.find(Ticket, {
+            where: {
+              group_id: payment.ticket.group.id,
+              status: TicketStatus.PENDING_PAYMENT,
+            },
+          });
+
+          const pendingTicketIds = pendingTickets
+            .map((ticket) => ticket.id)
+            .filter((ticketId) => ticketId !== payment.ticket_id);
+
+          if (pendingTicketIds.length > 0) {
+            const pendingPayments = await manager.find(Payment, {
+              where: {
+                ticket_id: In(pendingTicketIds),
+                status: PaymentStatus.PENDING,
+              },
+            });
+
+            const ticketIdsWithInvoice = new Set(
+              pendingPayments.map((pendingPayment) => pendingPayment.ticket_id),
+            );
+
+            const ticketsWithoutInvoice = pendingTicketIds.filter(
+              (ticketId) => !ticketIdsWithInvoice.has(ticketId),
+            );
+
+            if (ticketsWithoutInvoice.length > 0) {
+              await manager
+                .createQueryBuilder()
+                .update(Ticket)
+                .set({ status: TicketStatus.EXPIRED, slot_number: null })
+                .where('id IN (:...ids)', { ids: ticketsWithoutInvoice })
+                .execute();
+            }
+          }
+        }
       });
 
       // Create referral reward if eligible (1-level, 5% bonus)
@@ -210,8 +283,13 @@ export class PaymentsService {
         );
       }
     } else if (dto.status === PaymentStatus.REJECTED) {
+      payment.status = dto.status;
+      payment.note = dto.note ?? null;
+      await this.paymentRepo.save(payment);
+
       await this.ticketRepo.update(payment.ticket_id, {
         status: TicketStatus.PENDING_PAYMENT,
+        slot_number: null,
       });
     }
 
